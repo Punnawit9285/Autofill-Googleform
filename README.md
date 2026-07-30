@@ -1,4 +1,7 @@
+I.) Create Google Sheet --> Extension --> AppScripts
 **Google sheet must set up exactly like this
+
+II.) Copy Code.gs into AppScript
 
 Sheet1 : <img width="877" height="1315" alt="image" src="https://github.com/user-attachments/assets/f5a7fafd-4fdc-4a3a-9c55-a88fe605b83f" />
 
