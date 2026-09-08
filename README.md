@@ -1,10 +1,13 @@
+!! The problem of this is that it is hardcoded and specific to certain questions and column in 
+
 I.) Create Google Sheet --> Extension --> AppScripts
-**Google sheet must set up exactly like this
+**Google sheet must set up exactly like this**
 
 II.) Copy Code.gs into AppScript
 
 Sheet1 :
-<img width="877" height="1315" alt="image" src="https://github.com/user-attachments/assets/99bc9f74-accb-44f3-8444-a385b12d278e" />
+<img width="3000" height="1524" alt="image" src="https://github.com/user-attachments/assets/2254f2a0-44e4-45c2-91e9-58ec6be4ec1e" />
+
 
 
 Forms : 
