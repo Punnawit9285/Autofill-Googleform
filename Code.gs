@@ -1002,6 +1002,229 @@ function validateSetup() {
 }
 
 /* ------------------------------------------------------------------ */
+/* Testing without a second account                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Builds the destination for one student, without needing to be signed in
+ * as them. Shared by previewAs() and auditAllStudents().
+ */
+function buildForEmail(email, formKey) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  var configSheet = findSheet(ss, FORM_SHEET_NAMES);
+  if (!configSheet) return { error: "No form registry tab (expected one named 'Forms')." };
+
+  var registry = readFormRegistry(configSheet);
+  var form = pickForm(registry, normalizeKey(formKey));
+  if (!form) {
+    return { error: "No form with key '" + formKey + "'. Configured keys: " +
+                    registry.forms.map(function (f) { return f.displayKey; }).join(", ") };
+  }
+
+  var dataSheet = findSheet(ss, DATA_SHEET_NAMES);
+  if (!dataSheet) return { error: "No roster tab (expected one named 'SYNCDATA')." };
+
+  var roster = readRoster(dataSheet);
+  var match = findStudentRow(roster, email);
+  if (!match) {
+    return { error: "No roster row matches " + email + ". That visitor would be sent to " +
+                    (form.blankUrl || form.templateUrl) };
+  }
+
+  var student = extractStudent(match.row, roster);
+  var built = personalizeFormUrl(form.templateUrl, student, form.mapping, roster, match.row);
+
+  return {
+    form: form,
+    roster: roster,
+    rowNumber: match.rowNumber,
+    student: student,
+    url: built.url,
+    trace: built.trace
+  };
+}
+
+/**
+ * Shows exactly what one student would get, as if they had opened the link.
+ * You do NOT need their account.
+ *
+ *   previewAs('6512345630@docchula.com', 'Test1')
+ *
+ * Run it, then open View -> Logs. The destination URL at the bottom is the
+ * real pre-filled form: open it to see the questions already answered.
+ */
+function previewAs(email, formKey) {
+  var out = buildForEmail(email, formKey);
+  var lines = [];
+
+  if (out.error) {
+    lines.push("ERROR  " + out.error);
+    Logger.log(lines.join("\n"));
+    return lines;
+  }
+
+  lines.push("Form '" + out.form.displayKey + "', roster row " + out.rowNumber + " (" + email + ")");
+  lines.push("");
+  lines.push("Data read from the roster:");
+  for (var f in out.student) {
+    if (out.student.hasOwnProperty(f)) {
+      lines.push("  " + pad(f, 14) + (out.student[f] || "(empty)"));
+    }
+  }
+
+  lines.push("");
+  lines.push("Questions:");
+  for (var t = 0; t < out.trace.length; t++) {
+    var e = out.trace[t];
+    lines.push("  " + pad(e.key, 24) + pad(e.after || "(blank)", 28) + e.action);
+  }
+
+  lines.push("");
+  lines.push("Open this to see the real pre-filled form:");
+  lines.push(out.url);
+
+  Logger.log(lines.join("\n"));
+  return lines;
+}
+
+/**
+ * Dry-runs every student on the roster against one form and reports who
+ * would end up with missing answers. Use this instead of testing accounts
+ * one by one.
+ *
+ *   auditAllStudents('Test1')
+ */
+function auditAllStudents(formKey) {
+  var report = [];
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  var configSheet = findSheet(ss, FORM_SHEET_NAMES);
+  var dataSheet = findSheet(ss, DATA_SHEET_NAMES);
+  if (!configSheet || !dataSheet) {
+    report.push("ERROR  Missing the 'Forms' or 'SYNCDATA' tab.");
+    Logger.log(report.join("\n"));
+    return report;
+  }
+
+  var registry = readFormRegistry(configSheet);
+  var form = pickForm(registry, normalizeKey(formKey));
+  if (!form) {
+    report.push("ERROR  No form with key '" + formKey + "'. Configured keys: " +
+                registry.forms.map(function (f) { return f.displayKey; }).join(", "));
+    Logger.log(report.join("\n"));
+    return report;
+  }
+
+  var roster = readRoster(dataSheet);
+  report.push("Form '" + form.displayKey + "' against " + roster.rows.length + " roster rows");
+  report.push("");
+
+  var seenEmail = {};
+  var seenLocal = {};
+  var noEmail = [];
+  var dupEmail = [];
+  var localClash = [];
+  var blanksByKey = {};
+  var examples = [];
+
+  for (var i = 0; i < roster.rows.length; i++) {
+    var row = roster.rows[i];
+    var rowNumber = i + 2;
+
+    // Which address would this row be found by?
+    var address = "";
+    for (var j = 0; j < roster.emailColumns.length; j++) {
+      var v = normalizeEmail(row[roster.emailColumns[j]]);
+      if (v) { address = v; break; }
+    }
+
+    if (!address) {
+      noEmail.push(rowNumber);
+      continue;
+    }
+
+    if (seenEmail.hasOwnProperty(address)) {
+      dupEmail.push("row " + rowNumber + " repeats " + address + " (row " + seenEmail[address] +
+                    " wins; row " + rowNumber + " can never be reached)");
+    } else {
+      seenEmail[address] = rowNumber;
+    }
+
+    // Matching also succeeds on the part before '@', so two different
+    // addresses sharing it would resolve to whichever row comes first.
+    var local = address.split('@')[0];
+    if (seenLocal.hasOwnProperty(local) && seenLocal[local].address !== address) {
+      localClash.push("rows " + seenLocal[local].row + " and " + rowNumber + " share '" + local +
+                      "' (" + seenLocal[local].address + " vs " + address + ")");
+    } else if (!seenLocal.hasOwnProperty(local)) {
+      seenLocal[local] = { row: rowNumber, address: address };
+    }
+
+    var student = extractStudent(row, roster);
+    var built = personalizeFormUrl(form.templateUrl, student, form.mapping, roster, row);
+
+    var missing = [];
+    for (var t = 0; t < built.trace.length; t++) {
+      var e = built.trace[t];
+      if (e.action === 'no data on the roster' || e.action.indexOf('no data for') === 0) {
+        blanksByKey[e.key] = (blanksByKey[e.key] || 0) + 1;
+        missing.push(e.key);
+      }
+    }
+    if (missing.length && examples.length < 10) {
+      examples.push("row " + rowNumber + " (" + address + ") missing: " + missing.join(", "));
+    }
+  }
+
+  var reachable = roster.rows.length - noEmail.length - dupEmail.length;
+  report.push(reachable + " of " + roster.rows.length + " rows can be reached by a signed-in student.");
+
+  if (noEmail.length) {
+    report.push("");
+    report.push("ERROR  " + noEmail.length + " row(s) have no email address, so they can never " +
+                "be matched: rows " + noEmail.slice(0, 20).join(", ") +
+                (noEmail.length > 20 ? ", ..." : ""));
+  }
+  if (dupEmail.length) {
+    report.push("");
+    report.push("ERROR  Duplicate addresses:");
+    for (var d = 0; d < dupEmail.length; d++) report.push("  " + dupEmail[d]);
+  }
+  if (localClash.length) {
+    report.push("");
+    report.push("WARN   Different addresses share the part before '@', so the wrong student " +
+                "could be matched:");
+    for (var c = 0; c < localClash.length; c++) report.push("  " + localClash[c]);
+  }
+
+  report.push("");
+  var anyBlank = false;
+  for (var k in blanksByKey) {
+    if (blanksByKey.hasOwnProperty(k)) {
+      anyBlank = true;
+      report.push("WARN   " + k + " will be blank for " + blanksByKey[k] + " student(s).");
+    }
+  }
+  if (!anyBlank) report.push("Every question is filled in for every student.");
+
+  if (examples.length) {
+    report.push("");
+    report.push("Examples:");
+    for (var x = 0; x < examples.length; x++) report.push("  " + examples[x]);
+  }
+
+  Logger.log(report.join("\n"));
+  return report;
+}
+
+function pad(text, width) {
+  var s = String(text === null || text === undefined ? "" : text);
+  while (s.length < width) s += " ";
+  return s + "  ";
+}
+
+/* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
 /* ------------------------------------------------------------------ */
 

@@ -113,6 +113,49 @@ To find an entry id, open the pre-filled link and read it from the URL.
 
 ---
 
+## Testing it before you send it out
+
+You do **not** need a second student account. Only the identity check
+(*"who is visiting?"*) depends on being signed in as someone else —
+everything after that is data lookup, and can be dry-run from the editor.
+
+### Check one student — `previewAs(email, formKey)`
+
+```js
+previewAs('6512345630@docchula.com', 'Test1')
+```
+
+Run it from the Apps Script editor (Run → `previewAs`, then View → Logs).
+It prints the data read for that student, what each question receives, and
+a pre-filled URL you can open to see the real form. Works for **any** row
+on the roster, signed in as yourself.
+
+### Check the whole class — `auditAllStudents(formKey)`
+
+```js
+auditAllStudents('Test1')
+```
+
+Dry-runs every roster row against one form and reports:
+
+- rows with no email address, which can never be matched
+- duplicate addresses, where the second row is unreachable
+- two addresses sharing the part before `@` — matching accepts either, so
+  the wrong student could be filled in
+- how many students would get each question left blank, with examples
+
+This is the one to run after adding a form or re-syncing the roster.
+
+### The one test that does need another person
+
+To confirm identity detection end-to-end, add **one** helper's Google
+address to a spare `SYNCDATA` row (any Gmail works — it does not have to be
+`@docchula.com`) and have them open the link. If they get *their* row's
+data and not yours, the deployment settings are right. Remove the row
+afterwards.
+
+---
+
 ## When something does not fill in
 
 **Add `&debug=1` to the link.** Instead of redirecting, the page reports the
