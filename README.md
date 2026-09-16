@@ -113,6 +113,41 @@ To find an entry id, open the pre-filled link and read it from the URL.
 
 ---
 
+## Short links
+
+`shortenFormLinks()` fills a `short_url` column in the `Forms` tab — one
+short link per form — so you never open a shortener website by hand.
+
+```js
+shortenFormLinks()
+```
+
+Run it from the editor after adding a form. It:
+
+- builds each link itself (`?form=<key>&openExternalBrowser=1`), so the key
+  is always right
+- **follows the short link and checks it really lands on your form** before
+  writing it to the sheet; a dead service or a wrong redirect is reported,
+  never saved
+- remembers what it made, so re-running does not create duplicates or burn
+  through rate limits
+
+By default it uses free keyless services (is.gd, v.gd, TinyURL), trying the
+next one if a service is down.
+
+### Using your own bit.ly account
+
+For branded links and click statistics, put a bit.ly API token in
+**Project Settings → Script Properties** as `BITLY_TOKEN`. It will be used
+in preference to the free services. If the token is rejected, the log says
+so rather than quietly falling back.
+
+> Short links depend on someone else's service staying up. For anything
+> printed, point the QR code at the full `/exec` link instead — nobody types
+> a QR code, and it can never expire.
+
+---
+
 ## Testing it before you send it out
 
 You do **not** need a second student account. Only the identity check

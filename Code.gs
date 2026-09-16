@@ -36,6 +36,18 @@
  * form at once.
  */
 
+/**
+ * Headers in the Forms tab that hold bookkeeping rather than an entry id.
+ * They are skipped when reading the entry-id mapping.
+ */
+var RESERVED_FORM_COLUMNS = {
+  shorturl: true, shortlink: true, short: true, link: true,
+  qr: true, qrcode: true, qrurl: true,
+  note: true, notes: true, comment: true, comments: true,
+  description: true, status: true, owner: true,
+  updated: true, lastupdated: true, formname: true, formtitle: true
+};
+
 /** Tab names accepted for each role, in priority order (case-insensitive). */
 var FORM_SHEET_NAMES = ['forms', 'form', 'config', 'formconfig', 'form_config'];
 var DATA_SHEET_NAMES = ['syncdata', 'sync_data', 'sheet1', 'data', 'students', 'roster'];
@@ -243,6 +255,7 @@ function readRowMapping(headers, row, issues) {
       if (issues) issues.push("column " + columnLabel(c) + " has a value but no header, so it is ignored");
       continue;
     }
+    if (RESERVED_FORM_COLUMNS[header]) continue;
 
     if (header === 'mapping' || header === 'fields' || header === 'entries' || header === 'entry') {
       parseMappingText(cell, mapping, issues);
@@ -1222,6 +1235,256 @@ function pad(text, width) {
   var s = String(text === null || text === undefined ? "" : text);
   while (s.length < width) s += " ";
   return s + "  ";
+}
+
+/* ------------------------------------------------------------------ */
+/* Short links                                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Paste the deployed /exec URL here only if shortenFormLinks() reports that
+ * it cannot work the address out on its own. Leave blank otherwise.
+ */
+var WEB_APP_URL = '';
+
+/** Appended to every generated link so LINE opens it in the real browser. */
+var LINK_SUFFIX = '&openExternalBrowser=1';
+
+/**
+ * Fills a "short_url" column in the Forms tab, one short link per form.
+ *
+ * Run it from the editor (Run -> shortenFormLinks, then View -> Logs). Links
+ * already generated are reused, so it is safe to re-run after adding a form.
+ *
+ * For bit.ly links, put your API token in
+ * Project Settings -> Script Properties as BITLY_TOKEN. Without one, free
+ * keyless services are used instead.
+ */
+function shortenFormLinks() {
+  var report = [];
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  var configSheet = findSheet(ss, FORM_SHEET_NAMES);
+  if (!configSheet) {
+    report.push("ERROR  No form registry tab (expected one named 'Forms').");
+    Logger.log(report.join("\n"));
+    return report;
+  }
+
+  var base = resolveWebAppUrl();
+  if (!base.url) {
+    report.push("ERROR  " + base.error);
+    Logger.log(report.join("\n"));
+    return report;
+  }
+  report.push("Web app: " + base.url + "  (" + base.source + ")");
+  if (base.warning) report.push("WARN   " + base.warning);
+  report.push("");
+
+  var values = configSheet.getDataRange().getValues();
+  if (!values.length) {
+    report.push("ERROR  The Forms tab is empty.");
+    Logger.log(report.join("\n"));
+    return report;
+  }
+
+  var hasHeader = !looksLikeUrl(cellText(values[0][1]));
+  if (!hasHeader) {
+    report.push("ERROR  The Forms tab has no header row, so there is nowhere to label " +
+                "a short_url column. Add a header row (key | template_url | blank_url).");
+    Logger.log(report.join("\n"));
+    return report;
+  }
+
+  var headers = values[0].map(function (h) { return cellText(h); });
+  var shortCol = -1;
+  for (var c = 0; c < headers.length; c++) {
+    var h = normalizeField(headers[c]);
+    if (h === 'shorturl' || h === 'shortlink' || h === 'short') { shortCol = c; break; }
+  }
+  if (shortCol === -1) {
+    shortCol = headers.length;
+    configSheet.getRange(1, shortCol + 1).setValue('short_url');
+    report.push("Added a 'short_url' column at " + columnLabel(shortCol) + ".");
+  }
+
+  var cache = PropertiesService.getScriptProperties();
+  var made = 0, reused = 0, failed = 0;
+
+  for (var r = 1; r < values.length; r++) {
+    var key = normalizeKey(values[r][0]);
+    var displayKey = cellText(values[r][0]);
+    if (!key) continue;
+
+    var longUrl = base.url + '?form=' + encodeURIComponent(key) + LINK_SUFFIX;
+    var cacheKey = 'shorturl:' + longUrl;
+    var existing = cellText(values[r][shortCol] || "");
+    var cached = cache.getProperty(cacheKey);
+
+    if (existing && cached === existing) {
+      report.push(displayKey + "  " + existing + "  (already done)");
+      reused++;
+      continue;
+    }
+    if (cached && !existing) {
+      configSheet.getRange(r + 1, shortCol + 1).setValue(cached);
+      report.push(displayKey + "  " + cached + "  (restored from cache)");
+      reused++;
+      continue;
+    }
+
+    var made1 = createShortUrl(longUrl);
+    if (made1.error) {
+      report.push(displayKey + "  FAILED  " + made1.error);
+      failed++;
+    } else {
+      configSheet.getRange(r + 1, shortCol + 1).setValue(made1.url);
+      cache.setProperty(cacheKey, made1.url);
+      report.push(displayKey + "  " + made1.url + "  (new, via " + made1.provider + ", verified)");
+      for (var s = 0; s < made1.skipped.length; s++) {
+        report.push("    WARN   tried first and gave up on " + made1.skipped[s]);
+      }
+      made++;
+    }
+
+    Utilities.sleep(1200);   // stay inside the free services' rate limits
+  }
+
+  report.push("");
+  report.push(made + " created, " + reused + " reused, " + failed + " failed.");
+  if (failed) {
+    report.push("A failure usually means the service is down or rate-limiting. " +
+                "Re-run in a minute, or set BITLY_TOKEN in Script Properties.");
+  }
+
+  Logger.log(report.join("\n"));
+  return report;
+}
+
+/** Works out the deployed /exec address. */
+function resolveWebAppUrl() {
+  if (WEB_APP_URL) {
+    return { url: WEB_APP_URL.replace(/[?#].*$/, ''), source: 'WEB_APP_URL in the script' };
+  }
+
+  var url = "";
+  try {
+    url = ScriptApp.getService().getUrl() || "";
+  } catch (err) {
+    return { url: "", error: "Could not read the web app URL: " + err.message +
+                            ". Paste the /exec address into WEB_APP_URL at the top of the script." };
+  }
+
+  if (!url) {
+    return { url: "", error: "The script is not deployed as a web app yet, so it has no address. " +
+                            "Deploy it, or paste the /exec address into WEB_APP_URL." };
+  }
+
+  var result = { url: url.replace(/[?#].*$/, ''), source: 'ScriptApp.getService()' };
+  if (/\/dev$/.test(result.url)) {
+    result.warning = "This is the /dev address, which only works for you. Paste the /exec " +
+                     "address into WEB_APP_URL before sending links to students.";
+  }
+  return result;
+}
+
+/**
+ * Shortens one URL and confirms the result really redirects back to it.
+ * Returns { url, provider } or { error }.
+ */
+function createShortUrl(longUrl) {
+  var attempts = [];
+  var token = PropertiesService.getScriptProperties().getProperty('BITLY_TOKEN');
+  var providers = [];
+
+  if (token) providers.push({ name: 'bit.ly', fn: function () { return shortenViaBitly(longUrl, token); } });
+  providers.push({ name: 'is.gd',    fn: function () { return shortenViaPlainApi('https://is.gd/create.php?format=simple&url=', longUrl); } });
+  providers.push({ name: 'v.gd',     fn: function () { return shortenViaPlainApi('https://v.gd/create.php?format=simple&url=', longUrl); } });
+  providers.push({ name: 'tinyurl',  fn: function () { return shortenViaPlainApi('https://tinyurl.com/api-create.php?url=', longUrl); } });
+
+  for (var i = 0; i < providers.length; i++) {
+    var got;
+    try {
+      got = providers[i].fn();
+    } catch (err) {
+      attempts.push(providers[i].name + ": " + err.message);
+      continue;
+    }
+
+    if (!got || !looksLikeUrl(got)) {
+      attempts.push(providers[i].name + ": " + (got ? String(got).slice(0, 120) : "empty response"));
+      continue;
+    }
+
+    // Never write a link to the sheet without checking where it actually goes.
+    var check = verifyShortUrl(got, longUrl);
+    if (check.ok) return { url: got, provider: providers[i].name, skipped: attempts };
+    attempts.push(providers[i].name + ": " + check.reason);
+  }
+
+  return { error: attempts.join(' | ') };
+}
+
+function shortenViaPlainApi(endpoint, longUrl) {
+  var res = UrlFetchApp.fetch(endpoint + encodeURIComponent(longUrl), {
+    muteHttpExceptions: true,
+    followRedirects: true
+  });
+  var body = (res.getContentText() || "").trim();
+  if (res.getResponseCode() !== 200) return "HTTP " + res.getResponseCode() + " " + body.slice(0, 120);
+  return body;
+}
+
+function shortenViaBitly(longUrl, token) {
+  var res = UrlFetchApp.fetch('https://api-ssl.bitly.com/v4/shorten', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + token },
+    payload: JSON.stringify({ long_url: longUrl }),
+    muteHttpExceptions: true
+  });
+  var body = res.getContentText() || "";
+  if (res.getResponseCode() >= 300) return "HTTP " + res.getResponseCode() + " " + body.slice(0, 160);
+  try {
+    return (JSON.parse(body).link || "").replace(/^http:/, 'https:');
+  } catch (err) {
+    return "unreadable response: " + body.slice(0, 120);
+  }
+}
+
+/** Follows the short link one hop and checks it points at the intended URL. */
+function verifyShortUrl(shortUrl, longUrl) {
+  var res;
+  try {
+    res = UrlFetchApp.fetch(shortUrl, { followRedirects: false, muteHttpExceptions: true });
+  } catch (err) {
+    return { ok: false, reason: "could not open the short link: " + err.message };
+  }
+
+  var code = res.getResponseCode();
+  if (code < 300 || code >= 400) {
+    return { ok: false, reason: "short link returned HTTP " + code + " instead of a redirect" };
+  }
+
+  var headers = res.getAllHeaders() || {};
+  var location = headers['Location'] || headers['location'] || "";
+  if (Object.prototype.toString.call(location) === '[object Array]') location = location[0] || "";
+
+  if (!location) return { ok: false, reason: "redirect carried no destination" };
+  if (!sameUrl(location, longUrl)) {
+    return { ok: false, reason: "points at " + String(location).slice(0, 120) + " instead of the form" };
+  }
+  return { ok: true };
+}
+
+/** Compares two URLs allowing for re-encoding by the shortener. */
+function sameUrl(a, b) {
+  function norm(u) {
+    var s = String(u || "").trim().replace(/\/+$/, '');
+    try { s = decodeURIComponent(s); } catch (err) { /* leave as-is */ }
+    return s.replace(/^http:/i, 'https:');
+  }
+  return norm(a) === norm(b);
 }
 
 /* ------------------------------------------------------------------ */
